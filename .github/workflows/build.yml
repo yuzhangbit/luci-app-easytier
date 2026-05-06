@@ -28,7 +28,7 @@ jobs:
       fail-fast: false
       matrix:
         arch:
-          - aarch64_cortex-a53_neon-vfpv4
+          - aarch64_cortex-a53-neon-vfpv4
           - aarch64_cortex-a53
           - aarch64_cortex-a72
           - aarch64_generic
@@ -55,7 +55,7 @@ jobs:
           - x86_64
           
         sdk:
-          - 23.05.2
+          - 23.05.5
           - SNAPSHOT
 
     steps:
