@@ -63,12 +63,20 @@ jobs:
       - name: Building packages
         uses: openwrt/gh-action-sdk@main
         env:
-          # SDK镜像只能用无neon后缀标签
+          # 必须与 ghcr.io/openwrt/sdk 已发布的镜像标签完全一致
+          # 官方 SDK 镜像不带 neon/vfpv4 后缀，openwrt/gh-action-sdk 内部直接
+          # 以 ARCH 作为 FROM $CONTAINER:$ARCH 拉取镜像（见 action Dockerfile），
+          # 因此 ARCH 不能包含 neon-vfpv4 之类仅设备专属后缀。
           SDK_ARCH: aarch64_cortex-a53
-          # 路由设备完整架构（打包ipk时使用）
+          # 设备端 opkg 期望的完整架构标识（包含 NEON/VFP 等 ISA 后缀）。
+          # 保留该变量仅用于文档/展示目的，SDK 拉取始终使用上面的 SDK_ARCH。
+          # 构建完成后，下方的 "Rewrite ipk/apk Architecture" 步骤会把
+          # control 归档里的 Architecture 字段改写成 TARGET_ARCH，让包
+          # 可以直接被 aarch64_cortex-a53_neon-vfpv4 等带后缀设备识别，
+          # 不需要用户手工向 /etc/opkg/arch.conf 添加兼容条目。
           TARGET_ARCH: aarch64_cortex-a53_neon-vfpv4
           OPENWRT_BRANCH: 23.05
-          ARCH: ${{ env.TARGET_ARCH }}-${{ matrix.sdk }}
+          ARCH: ${{ env.SDK_ARCH }}-${{ matrix.sdk }}
           FEEDNAME: packages_ci
           PACKAGES: easytier easytier-noweb luci-app-easytier
           #NO_DEFAULT_FEEDS: 1
@@ -76,6 +84,64 @@ jobs:
           NO_SHFMT_CHECK: 1
           MAKEFLAGS: -j$(nproc)
           V: s
+
+      - name: Rewrite ipk/apk Architecture to add NEON-VFPv4 suffix
+        run: |
+          set -e
+          PKG_DIR="bin/packages/${{ matrix.arch }}/packages_ci"
+          cd "$PKG_DIR"
+          CUR_DIR=$(pwd)
+          shopt -s nullglob
+
+          # 官方 SDK 镜像（ghcr.io/openwrt/sdk:aarch64_cortex-a53-SNAPSHOT）只发布
+          # 基础架构，因此 ipk/apk 被打包为 Architecture: aarch64_cortex-a53。
+          # 对于 opkg 报告为 aarch64_cortex-a53_neon-vfpv4 的设备
+          # （如 GL.iNet GL-BE6500），默认会被 opkg 判为架构不兼容而拒绝安装。
+          # 这里在构建结束后改写 control 归档里的 Architecture 字段，
+          # 让包可以直接安装，无需在 /etc/opkg/arch.conf 里手动添加兼容条目。
+          # 仅当原 Architecture 字段等于 SDK_ARCH 时才改写，luci-app-easytier 的
+          # LUCI_PKGARCH:=all 不受影响；非 aarch64_cortex-a53 矩阵不匹配则跳过。
+          for pkg in *.ipk *.apk; do
+            [ -f "$pkg" ] || continue
+            workdir=$(mktemp -d)
+            cp "$pkg" "$workdir/orig.pkg"
+            (cd "$workdir" && ar x orig.pkg)
+
+            ctar=$(ls "$workdir"/control.tar.* 2>/dev/null | head -1)
+            [ -z "$ctar" ] && ctar="$workdir/control.tar"
+
+            mkdir -p "$workdir/ctrl"
+            case "$ctar" in
+              *.gz) tar -xzf "$ctar" -C "$workdir/ctrl" ;;
+              *.xz) tar -xJf "$ctar" -C "$workdir/ctrl" ;;
+              *)    tar -xf  "$ctar" -C "$workdir/ctrl" ;;
+            esac
+
+            ctrl_file="$workdir/ctrl/control"
+            if [ ! -f "$ctrl_file" ] || \
+               ! grep -q "^Architecture: aarch64_cortex-a53$" "$ctrl_file"; then
+              echo "Skip $pkg (Architecture not aarch64_cortex-a53)"
+              rm -rf "$workdir"
+              continue
+            fi
+
+            sed -i 's|^Architecture: aarch64_cortex-a53$|Architecture: aarch64_cortex-a53_neon-vfpv4|' "$ctrl_file"
+            # control 内容已变更，丢掉旧的 md5sums，避免 opkg 因摘要不匹配报错
+            rm -f "$workdir/ctrl/md5sums"
+
+            rm -f "$ctar"
+            case "$ctar" in
+              *.gz) (cd "$workdir/ctrl" && tar -czf "$ctar" .) ;;
+              *.xz) (cd "$workdir/ctrl" && tar -cJf "$ctar" .) ;;
+              *)    (cd "$workdir/ctrl" && tar -cf  "$ctar" .) ;;
+            esac
+
+            rm -f "$pkg"
+            (cd "$workdir" && ar rcs "$CUR_DIR/$pkg" debian-binary control.tar.* data.tar.*)
+
+            echo "Rewrote $pkg -> Architecture: aarch64_cortex-a53_neon-vfpv4"
+            rm -rf "$workdir"
+          done
 
       - name: Generate package guide
         run: |
