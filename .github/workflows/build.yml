@@ -27,9 +27,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # 用设备实际 opkg 架构（包含 _neon-vfpv4 等 ISA 后缀），保证产物
+        # ipk/apk 元数据直接与设备匹配；下方 Building 步骤会把矩阵值
+        # 剥掉后缀作为 SDK 镜像标签，使 SDK 与 aarch64_cortex-a53 共用同一镜像。
         arch:
-          - aarch64_cortex-a53
-          
+          - aarch64_cortex-a53_neon-vfpv4
+
         sdk:
           - 23.05.5
           - SNAPSHOT
@@ -63,18 +66,17 @@ jobs:
       - name: Building packages
         uses: openwrt/gh-action-sdk@main
         env:
-          # 必须与 ghcr.io/openwrt/sdk 已发布的镜像标签完全一致。
-          # 官方 SDK 镜像不带 neon/vfpv4 后缀——openwrt/gh-action-sdk 内部
-          # 以 ARCH 作为 FROM $CONTAINER:$ARCH 拉取镜像（见 action Dockerfile），
-          # 因此 ARCH 不能包含 neon-vfpv4 等仅设备专属后缀。
-          # 注意：同一 env 块内的变量不能用 ${{ env.X }} 互相引用（GitHub Actions
-          # 求值时 X 尚未生效），所以这里直接从 matrix.arch 取值。
-          # 构建完成后，下方的 "Rewrite ipk/apk Architecture" 步骤会把
-          # control 归档里的 Architecture 字段从 aarch64_cortex-a53 改写成
-          # aarch64_cortex-a53_neon-vfpv4，让 ipk/apk 能被 GL-BE6500 等带后缀
-          # 设备直接识别，不需要用户手工向 /etc/opkg/arch.conf 添加兼容条目。
+          # 矩阵里 matrix.arch 是设备实际 opkg 架构（含 _neon-vfpv4 后缀），
+          # 但官方 SDK 镜像（ghcr.io/openwrt/sdk:*）不带此类仅设备专属后缀。
+          # openwrt/gh-action-sdk 内部以 ARCH 作为 FROM $CONTAINER:$ARCH 拉取
+          # 镜像（见 action Dockerfile），所以这里把 matrix.arch 剥掉后缀再拼上
+          # matrix.sdk，得到与 aarch64_cortex-a53 共用的镜像标签。
+          # 下方的 "Rewrite ipk/apk Architecture" 步骤会把 ipk/apk 元数据
+          # 里的架构字段补回完整后缀，让 GL-BE6500 等设备直接识别。
+          # 注意：同一 env 块内的变量不能用 ${{ env.X }} 互相引用，所以
+          # SDK_ARCH 和 ARCH 都直接从 matrix.arch 派生，而不是互相引用。
           OPENWRT_BRANCH: 23.05
-          ARCH: ${{ matrix.arch }}-${{ matrix.sdk }}
+          ARCH: ${{ matrix.arch.replace('_neon-vfpv4', '') }}-${{ matrix.sdk }}
           FEEDNAME: packages_ci
           PACKAGES: easytier easytier-noweb luci-app-easytier
           #NO_DEFAULT_FEEDS: 1
@@ -84,6 +86,11 @@ jobs:
           V: s
 
       - name: Rewrite ipk/apk Architecture to add NEON-VFPv4 suffix
+        env:
+          # 与 Building packages 步骤保持一致：剥掉 _neon-vfpv4 后缀得到
+          # SDK 输出的基础架构；matrix.arch 本身是设备期望的完整架构。
+          SDK_ARCH: ${{ matrix.arch.replace('_neon-vfpv4', '') }}
+          TARGET_ARCH: ${{ matrix.arch }}
         run: |
           set -e
           PKG_DIR="bin/packages/${{ matrix.arch }}/packages_ci"
@@ -91,13 +98,12 @@ jobs:
           CUR_DIR=$(pwd)
           shopt -s nullglob
 
-          # 官方 SDK 镜像（ghcr.io/openwrt/sdk:aarch64_cortex-a53-SNAPSHOT）只发布
-          # 基础架构，因此 ipk/apk 被打包为 aarch64_cortex-a53。对于 opkg 报告为
-          # aarch64_cortex-a53_neon-vfpv4 的设备（如 GL.iNet GL-BE6500），默认会
-          # 被 opkg/apk 判为架构不兼容而拒绝安装。这里在构建结束后改写元数据里的
-          # 架构字段，让包可以直接安装，无需在 /etc/opkg/arch.conf 里手动添加。
-          # 仅当原字段等于基础架构时才改写；luci-app-easytier 的 LUCI_PKGARCH:=all
-          # 不受影响。
+          # SDK 输出的是基础架构（SDK_ARCH），设备实际识别的是完整架构
+          # （TARGET_ARCH）。这里在构建结束后把元数据里的架构字段从
+          # SDK_ARCH 改写成 TARGET_ARCH，让包可以直接安装，无需在
+          # /etc/opkg/arch.conf 里手动添加兼容条目。
+          # 仅当原字段等于 SDK_ARCH 时才改写；luci-app-easytier 的
+          # LUCI_PKGARCH:=all 不受影响。
           #
           # 两种包格式元数据位置不同：
           #   - ipk (OpenWrt 22.03/23.05, opkg)  = ar 归档，含 control.tar.*；
@@ -123,15 +129,15 @@ jobs:
                 *)    tar -xf  "$ctar" -C "$workdir/ctrl" ;;
               esac
               ctrl_file="$workdir/ctrl/control"
-              pattern='^Architecture: aarch64_cortex-a53$'
-              replacement='Architecture: aarch64_cortex-a53_neon-vfpv4'
+              pattern="^Architecture: ${SDK_ARCH}\$"
+              replacement="Architecture: ${TARGET_ARCH}"
             elif tar -tzf "$workdir/orig" >/dev/null 2>&1; then
               format=apk
               mkdir -p "$workdir/extract"
               tar -xzf "$workdir/orig" -C "$workdir/extract"
               ctrl_file="$workdir/extract/.PKGINFO"
-              pattern='^arch = aarch64_cortex-a53$'
-              replacement='arch = aarch64_cortex-a53_neon-vfpv4'
+              pattern="^arch = ${SDK_ARCH}\$"
+              replacement="arch = ${TARGET_ARCH}"
             else
               echo "Skip $pkg (unrecognized package format)"
               rm -rf "$workdir"
