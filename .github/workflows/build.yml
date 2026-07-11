@@ -29,7 +29,6 @@ jobs:
       matrix:
         arch:
           - aarch64_cortex-a53
-          - aarch64_cortex-a53_neon-vfpv4
           
         sdk:
           - 23.05.5
@@ -64,7 +63,12 @@ jobs:
       - name: Building packages
         uses: openwrt/gh-action-sdk@main
         env:
-          ARCH: ${{ matrix.arch }}-${{ matrix.sdk }}
+          # SDK镜像只能用无neon后缀标签
+          SDK_ARCH: aarch64_cortex-a53
+          # 路由设备完整架构（打包ipk时使用）
+          TARGET_ARCH: aarch64_cortex-a53_neon-vfpv4
+          OPENWRT_BRANCH: 23.05
+          ARCH: ${{ env.TARGET_ARCH }}-${{ matrix.sdk }}
           FEEDNAME: packages_ci
           PACKAGES: easytier easytier-noweb luci-app-easytier
           #NO_DEFAULT_FEEDS: 1
@@ -199,7 +203,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.arch }}-${{ matrix.sdk }}
+          name: ${{ env.TARGET_ARCH }}-${{ matrix.sdk }}
           path: bin/packages/${{ matrix.arch }}/packages_ci/*
 
   release:
