@@ -63,20 +63,18 @@ jobs:
       - name: Building packages
         uses: openwrt/gh-action-sdk@main
         env:
-          # 必须与 ghcr.io/openwrt/sdk 已发布的镜像标签完全一致
-          # 官方 SDK 镜像不带 neon/vfpv4 后缀，openwrt/gh-action-sdk 内部直接
+          # 必须与 ghcr.io/openwrt/sdk 已发布的镜像标签完全一致。
+          # 官方 SDK 镜像不带 neon/vfpv4 后缀——openwrt/gh-action-sdk 内部
           # 以 ARCH 作为 FROM $CONTAINER:$ARCH 拉取镜像（见 action Dockerfile），
-          # 因此 ARCH 不能包含 neon-vfpv4 之类仅设备专属后缀。
-          SDK_ARCH: aarch64_cortex-a53
-          # 设备端 opkg 期望的完整架构标识（包含 NEON/VFP 等 ISA 后缀）。
-          # 保留该变量仅用于文档/展示目的，SDK 拉取始终使用上面的 SDK_ARCH。
+          # 因此 ARCH 不能包含 neon-vfpv4 等仅设备专属后缀。
+          # 注意：同一 env 块内的变量不能用 ${{ env.X }} 互相引用（GitHub Actions
+          # 求值时 X 尚未生效），所以这里直接从 matrix.arch 取值。
           # 构建完成后，下方的 "Rewrite ipk/apk Architecture" 步骤会把
-          # control 归档里的 Architecture 字段改写成 TARGET_ARCH，让包
-          # 可以直接被 aarch64_cortex-a53_neon-vfpv4 等带后缀设备识别，
-          # 不需要用户手工向 /etc/opkg/arch.conf 添加兼容条目。
-          TARGET_ARCH: aarch64_cortex-a53_neon-vfpv4
+          # control 归档里的 Architecture 字段从 aarch64_cortex-a53 改写成
+          # aarch64_cortex-a53_neon-vfpv4，让 ipk/apk 能被 GL-BE6500 等带后缀
+          # 设备直接识别，不需要用户手工向 /etc/opkg/arch.conf 添加兼容条目。
           OPENWRT_BRANCH: 23.05
-          ARCH: ${{ env.SDK_ARCH }}-${{ matrix.sdk }}
+          ARCH: ${{ matrix.arch }}-${{ matrix.sdk }}
           FEEDNAME: packages_ci
           PACKAGES: easytier easytier-noweb luci-app-easytier
           #NO_DEFAULT_FEEDS: 1
