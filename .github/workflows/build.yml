@@ -92,52 +92,77 @@ jobs:
           shopt -s nullglob
 
           # 官方 SDK 镜像（ghcr.io/openwrt/sdk:aarch64_cortex-a53-SNAPSHOT）只发布
-          # 基础架构，因此 ipk/apk 被打包为 Architecture: aarch64_cortex-a53。
-          # 对于 opkg 报告为 aarch64_cortex-a53_neon-vfpv4 的设备
-          # （如 GL.iNet GL-BE6500），默认会被 opkg 判为架构不兼容而拒绝安装。
-          # 这里在构建结束后改写 control 归档里的 Architecture 字段，
-          # 让包可以直接安装，无需在 /etc/opkg/arch.conf 里手动添加兼容条目。
-          # 仅当原 Architecture 字段等于 SDK_ARCH 时才改写，luci-app-easytier 的
-          # LUCI_PKGARCH:=all 不受影响；非 aarch64_cortex-a53 矩阵不匹配则跳过。
+          # 基础架构，因此 ipk/apk 被打包为 aarch64_cortex-a53。对于 opkg 报告为
+          # aarch64_cortex-a53_neon-vfpv4 的设备（如 GL.iNet GL-BE6500），默认会
+          # 被 opkg/apk 判为架构不兼容而拒绝安装。这里在构建结束后改写元数据里的
+          # 架构字段，让包可以直接安装，无需在 /etc/opkg/arch.conf 里手动添加。
+          # 仅当原字段等于基础架构时才改写；luci-app-easytier 的 LUCI_PKGARCH:=all
+          # 不受影响。
+          #
+          # 两种包格式元数据位置不同：
+          #   - ipk (OpenWrt 22.03/23.05, opkg)  = ar 归档，含 control.tar.*；
+          #     修改 control 里的 "Architecture: ..."。
+          #   - apk (OpenWrt SNAPSHOT, apk)      = tar.gz 归档，含 .PKGINFO；
+          #     修改 .PKGINFO 里的 "arch = ..."。
           for pkg in *.ipk *.apk; do
             [ -f "$pkg" ] || continue
+
             workdir=$(mktemp -d)
-            cp "$pkg" "$workdir/orig.pkg"
-            (cd "$workdir" && ar x orig.pkg)
+            cp "$pkg" "$workdir/orig"
 
-            ctar=$(ls "$workdir"/control.tar.* 2>/dev/null | head -1)
-            [ -z "$ctar" ] && ctar="$workdir/control.tar"
-
-            mkdir -p "$workdir/ctrl"
-            case "$ctar" in
-              *.gz) tar -xzf "$ctar" -C "$workdir/ctrl" ;;
-              *.xz) tar -xJf "$ctar" -C "$workdir/ctrl" ;;
-              *)    tar -xf  "$ctar" -C "$workdir/ctrl" ;;
-            esac
-
-            ctrl_file="$workdir/ctrl/control"
-            if [ ! -f "$ctrl_file" ] || \
-               ! grep -q "^Architecture: aarch64_cortex-a53$" "$ctrl_file"; then
-              echo "Skip $pkg (Architecture not aarch64_cortex-a53)"
+            # 先探测格式，避免对非 ar 文件调用 ar 而导致 set -e 中断
+            if ar t "$workdir/orig" >/dev/null 2>&1; then
+              format=ipk
+              (cd "$workdir" && ar x orig)
+              ctar=$(ls "$workdir"/control.tar.* 2>/dev/null | head -1)
+              [ -z "$ctar" ] && ctar="$workdir/control.tar"
+              mkdir -p "$workdir/ctrl"
+              case "$ctar" in
+                *.gz) tar -xzf "$ctar" -C "$workdir/ctrl" ;;
+                *.xz) tar -xJf "$ctar" -C "$workdir/ctrl" ;;
+                *)    tar -xf  "$ctar" -C "$workdir/ctrl" ;;
+              esac
+              ctrl_file="$workdir/ctrl/control"
+              pattern='^Architecture: aarch64_cortex-a53$'
+              replacement='Architecture: aarch64_cortex-a53_neon-vfpv4'
+            elif tar -tzf "$workdir/orig" >/dev/null 2>&1; then
+              format=apk
+              mkdir -p "$workdir/extract"
+              tar -xzf "$workdir/orig" -C "$workdir/extract"
+              ctrl_file="$workdir/extract/.PKGINFO"
+              pattern='^arch = aarch64_cortex-a53$'
+              replacement='arch = aarch64_cortex-a53_neon-vfpv4'
+            else
+              echo "Skip $pkg (unrecognized package format)"
               rm -rf "$workdir"
               continue
             fi
 
-            sed -i 's|^Architecture: aarch64_cortex-a53$|Architecture: aarch64_cortex-a53_neon-vfpv4|' "$ctrl_file"
-            # control 内容已变更，丢掉旧的 md5sums，避免 opkg 因摘要不匹配报错
-            rm -f "$workdir/ctrl/md5sums"
+            if [ ! -f "$ctrl_file" ] || ! grep -q "$pattern" "$ctrl_file"; then
+              echo "Skip $pkg (no matching field in $ctrl_file)"
+              rm -rf "$workdir"
+              continue
+            fi
 
-            rm -f "$ctar"
-            case "$ctar" in
-              *.gz) (cd "$workdir/ctrl" && tar -czf "$ctar" .) ;;
-              *.xz) (cd "$workdir/ctrl" && tar -cJf "$ctar" .) ;;
-              *)    (cd "$workdir/ctrl" && tar -cf  "$ctar" .) ;;
-            esac
+            sed -i "s|$pattern|$replacement|" "$ctrl_file"
 
-            rm -f "$pkg"
-            (cd "$workdir" && ar rcs "$CUR_DIR/$pkg" debian-binary control.tar.* data.tar.*)
+            if [ "$format" = "ipk" ]; then
+              # control 内容已变更，丢掉旧的 md5sums，避免 opkg 因摘要不匹配报错
+              rm -f "$workdir/ctrl/md5sums"
+              rm -f "$ctar"
+              case "$ctar" in
+                *.gz) (cd "$workdir/ctrl" && tar -czf "$ctar" .) ;;
+                *.xz) (cd "$workdir/ctrl" && tar -cJf "$ctar" .) ;;
+                *)    (cd "$workdir/ctrl" && tar -cf  "$ctar" .) ;;
+              esac
+              rm -f "$pkg"
+              (cd "$workdir" && ar rcs "$CUR_DIR/$pkg" debian-binary control.tar.* data.tar.*)
+            else
+              rm -f "$pkg"
+              (cd "$workdir/extract" && tar -czf "$CUR_DIR/$pkg" .)
+            fi
 
-            echo "Rewrote $pkg -> Architecture: aarch64_cortex-a53_neon-vfpv4"
+            echo "Rewrote $pkg ($format) -> $replacement"
             rm -rf "$workdir"
           done
 
