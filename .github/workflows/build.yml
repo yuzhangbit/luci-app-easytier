@@ -48,7 +48,7 @@ jobs:
             /opt/openwrt-sdk-${{ matrix.arch }}-${{ matrix.sdk }}
             dl
           key: sdk-${{ matrix.arch }}-${{ matrix.sdk }}
-          
+
       - name: Create i18n uci-defaults file
         run: |
           mkdir -p luci-app-easytier/root/etc/uci-defaults
@@ -62,21 +62,37 @@ jobs:
           exit 0
           EOF
           chmod +x luci-app-easytier/root/etc/uci-defaults/luci-i18n-easytier-zh-cn
-          
+
+      - name: Derive SDK arch from device arch
+        id: sdk_arch
+        env:
+          DEVICE_ARCH: ${{ matrix.arch }}
+        run: |
+          # GitHub Actions 表达式不支持 .replace() 等字符串方法，所以
+          # 用 bash 剥掉常见的 ISA 后缀得到 SDK 镜像标签。
+          # 官方 SDK 镜像（ghcr.io/openwrt/sdk:*）不带 _neon-vfpv4 等
+          # 仅设备专属后缀；不加 ISA 后缀的架构（如 mipsel）原样保留。
+          stripped="$DEVICE_ARCH"
+          case "$stripped" in
+            *_neon-vfpv4) stripped="${stripped%_neon-vfpv4}" ;;
+            *_neon)       stripped="${stripped%_neon}" ;;
+            *_vfpv4)      stripped="${stripped%_vfpv4}" ;;
+          esac
+          {
+            echo "value=$stripped"
+            echo "device=$DEVICE_ARCH"
+          } >> "$GITHUB_OUTPUT"
+          echo "Derived SDK arch: $stripped (device: $DEVICE_ARCH)"
+
       - name: Building packages
         uses: openwrt/gh-action-sdk@main
         env:
-          # 矩阵里 matrix.arch 是设备实际 opkg 架构（含 _neon-vfpv4 后缀），
-          # 但官方 SDK 镜像（ghcr.io/openwrt/sdk:*）不带此类仅设备专属后缀。
-          # openwrt/gh-action-sdk 内部以 ARCH 作为 FROM $CONTAINER:$ARCH 拉取
-          # 镜像（见 action Dockerfile），所以这里把 matrix.arch 剥掉后缀再拼上
-          # matrix.sdk，得到与 aarch64_cortex-a53 共用的镜像标签。
-          # 下方的 "Rewrite ipk/apk Architecture" 步骤会把 ipk/apk 元数据
-          # 里的架构字段补回完整后缀，让 GL-BE6500 等设备直接识别。
-          # 注意：同一 env 块内的变量不能用 ${{ env.X }} 互相引用，所以
-          # SDK_ARCH 和 ARCH 都直接从 matrix.arch 派生，而不是互相引用。
+          # openwrt/gh-action-sdk 内部以 ARCH 作为 FROM $CONTAINER:$ARCH
+          # 拉取镜像（见 action Dockerfile），必须与 ghcr.io/openwrt/sdk
+          # 已发布的标签完全一致。这里用上一步派生出的 SDK 镜像标签。
+          # ipk/apk 元数据里的完整架构后缀由下一步 "Rewrite" 补回。
           OPENWRT_BRANCH: 23.05
-          ARCH: ${{ matrix.arch.replace('_neon-vfpv4', '') }}-${{ matrix.sdk }}
+          ARCH: ${{ steps.sdk_arch.outputs.value }}-${{ matrix.sdk }}
           FEEDNAME: packages_ci
           PACKAGES: easytier easytier-noweb luci-app-easytier
           #NO_DEFAULT_FEEDS: 1
@@ -87,10 +103,10 @@ jobs:
 
       - name: Rewrite ipk/apk Architecture to add NEON-VFPv4 suffix
         env:
-          # 与 Building packages 步骤保持一致：剥掉 _neon-vfpv4 后缀得到
-          # SDK 输出的基础架构；matrix.arch 本身是设备期望的完整架构。
-          SDK_ARCH: ${{ matrix.arch.replace('_neon-vfpv4', '') }}
-          TARGET_ARCH: ${{ matrix.arch }}
+          # value = 去掉 ISA 后缀的基础架构（SDK 输出的形式）
+          # device = 完整设备架构（ipk/apk 元数据需要声明的形式）
+          SDK_ARCH: ${{ steps.sdk_arch.outputs.value }}
+          TARGET_ARCH: ${{ steps.sdk_arch.outputs.device }}
         run: |
           set -e
           PKG_DIR="bin/packages/${{ matrix.arch }}/packages_ci"
@@ -298,7 +314,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.TARGET_ARCH }}-${{ matrix.sdk }}
+          name: ${{ steps.sdk_arch.outputs.device }}-${{ matrix.sdk }}
           path: bin/packages/${{ matrix.arch }}/packages_ci/*
 
   release:
